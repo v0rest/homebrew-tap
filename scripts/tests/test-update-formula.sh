@@ -94,14 +94,70 @@ else
     ok "$name"
 fi
 
-# A file that differs anywhere else is rewritten too.
-name="hand-edited file is updated"
-printf '# hand edit\n' >> "$formula"
+# add_bottle_block <formula> - a bottle block where `brew bottle --merge` puts it, after license and a blank line.
+add_bottle_block() {
+    awk '
+        { print }
+        /^  license / { license = 1; next }
+        license && /^$/ {
+            print "  bottle do"
+            print "    root_url \"https://github.com/v0rest/homebrew-tap/releases/download/busysign-1.2.3\""
+            print "    sha256 cellar: :any_skip_relocation, arm64_sequoia: \"" sha "\""
+            print "  end"
+            print ""
+            license = 0
+        }
+    ' sha="$sha_a" "$1" > "$1.tmp"
+    mv "$1.tmp" "$1"
+}
+
+# The source decides: a matching url and sha256 is unchanged, with or without a bottle block.
+name="bottle block with the same url and sha is unchanged"
+add_bottle_block "$formula"
+cp "$formula" "$tmp/with-bottle.rb"
+grep -qx '  bottle do' "$formula" || { echo "FAIL $name: test setup added no bottle block"; exit 1; }
 run "$script" 1.2.3 "$sha_b" "$formula"
+if [[ $rc -ne 0 || $out != unchanged ]]; then
+    fail "$name" "exit $rc, printed '$out': $err"
+elif ! cmp -s "$tmp/with-bottle.rb" "$formula"; then
+    fail "$name" "file changed"
+else
+    ok "$name"
+fi
+
+name="hand edit with the same url and sha is unchanged"
+printf '# hand edit\n' >> "$formula"
+cp "$formula" "$tmp/hand-edit.rb"
+run "$script" 1.2.3 "$sha_b" "$formula"
+if [[ $rc -ne 0 || $out != unchanged ]]; then
+    fail "$name" "exit $rc, printed '$out': $err"
+elif ! cmp -s "$tmp/hand-edit.rb" "$formula"; then
+    fail "$name" "file changed"
+else
+    ok "$name"
+fi
+
+name="new sha drops the bottle block"
+run "$script" 1.2.3 "$sha_a" "$formula"
 if [[ $rc -ne 0 || $out != updated ]]; then
     fail "$name" "exit $rc, printed '$out': $err"
-elif grep -q 'hand edit' "$formula"; then
-    fail "$name" "hand edit kept"
+elif grep -q 'bottle do\|hand edit' "$formula"; then
+    fail "$name" "bottle block or hand edit kept"
+elif ! grep -qxF "  sha256 \"$sha_a\"" "$formula"; then
+    fail "$name" "sha256 not replaced"
+else
+    ok "$name"
+fi
+
+name="new version drops the bottle block"
+add_bottle_block "$formula"
+run "$script" 1.2.4 "$sha_a" "$formula"
+if [[ $rc -ne 0 || $out != updated ]]; then
+    fail "$name" "exit $rc, printed '$out': $err"
+elif grep -q 'bottle do' "$formula"; then
+    fail "$name" "bottle block kept"
+elif ! grep -qF 'releases/download/v1.2.4/busysign-1.2.4.tar.gz"' "$formula"; then
+    fail "$name" "url not replaced"
 else
     ok "$name"
 fi

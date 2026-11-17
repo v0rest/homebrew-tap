@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Write the busysign formula for a release; prints "updated", or "unchanged" when the file is already byte-identical.
+# Write the busysign formula (no bottle block) for a release; prints "updated", or "unchanged" when url and sha match.
 # Usage: scripts/update-formula.sh <version> <sha256> [formula-path (default: Formula/busysign.rb)]
 set -euo pipefail
 
@@ -23,14 +23,22 @@ if ! [[ $sha =~ $sha_re ]]; then
 fi
 root="$(cd "$(dirname "$0")/.." && pwd)"
 formula="${3:-$root/Formula/busysign.rb}"
+url="https://github.com/v0rest/busysign/releases/download/v${version}/busysign-${version}.tar.gz"
+
+# The source decides whether there is work: the same url and sha256 is unchanged, bottle block or not.
+if [[ -f $formula ]] && grep -qxF "  url \"$url\"" "$formula" && grep -qxF "  sha256 \"$sha\"" "$formula"; then
+    echo unchanged
+    exit 0
+fi
 
 # The whole formula comes from here, so a change to Formula/busysign.rb belongs in this template.
+# The bottle block is added later by scripts/write-bottle-block.sh, once the bottles are uploaded.
 render() {
     cat <<EOF
 class Busysign < Formula
   desc "Menu-bar app that mirrors plain Busy blocks between your macOS calendars"
   homepage "https://github.com/v0rest/busysign"
-  url "https://github.com/v0rest/busysign/releases/download/v${version}/busysign-${version}.tar.gz"
+  url "${url}"
   sha256 "${sha}"
   license "MIT"
 
@@ -65,10 +73,6 @@ mkdir -p "$(dirname "$formula")"
 tmp="$(mktemp "$formula.XXXXXX")"
 trap 'rm -f "$tmp"' EXIT
 render > "$tmp"
-if [[ -f $formula ]] && cmp -s "$tmp" "$formula"; then
-    echo unchanged
-    exit 0
-fi
 chmod 644 "$tmp"
 mv "$tmp" "$formula"
 echo updated

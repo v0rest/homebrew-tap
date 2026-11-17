@@ -1,6 +1,8 @@
 name: bump
 
-# Pulls a busysign release, checks it, tests the formula on macOS 15, 26 and 27 and only then commits it to main.
+# Pulls a busysign release, checks it, tests the formula and builds a bottle on macOS 15, 26 and 27, uploads the
+# bottles to the tap release busysign-<version>, only then commits the formula with its bottle block to main, and
+# installs it from GitHub as a user would.
 on:
   workflow_dispatch:
     inputs:
@@ -106,7 +108,7 @@ jobs:
         # xcode-27 is GitHub's public-preview macOS 27 image (actions/runner-images#14404).
         os: [macos-15, macos-26, xcode-27]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 40
+    timeout-minutes: 60
     permissions:
       contents: read
     env:
@@ -131,15 +133,29 @@ jobs:
       - name: Install, test and audit the formula
         run: scripts/test-formula.sh "$RUNNER_TEMP/formula/busysign.rb"
 
+      - name: Build, pour and check a bottle
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: scripts/build-bottle.sh "$VERSION" "$RUNNER_TEMP/bottle"
+
+      - name: Upload the bottle
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: bottle-${{ matrix.os }}
+          path: ${{ runner.temp }}/bottle/
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: true
+
   publish:
     name: publish
     needs: [prepare, test]
     # A run started from another branch tests its formula but never publishes it.
     if: needs.prepare.outputs.changed == 'updated' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 15
     permissions:
-      contents: write # push the formula commit to main
+      contents: write # upload the bottles to the tap release and push the formula commit to main
     steps:
       # The only job that keeps the checkout credentials: it pushes the formula to main.
       - name: Check out main
@@ -148,13 +164,62 @@ jobs:
           ref: main
           persist-credentials: true
 
+      # prepare decided on the event's commit; main may have moved since (a re-run, or a run that waited for
+      # another). Bottles that main already pins are never replaced, and main never goes back to an older version.
+      - name: Check main before publishing
+        id: main
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          status=0
+          scripts/is-published.sh Formula/busysign.rb "$VERSION" || status=$?
+          case "$status" in
+            0)
+              echo "published=true" >> "$GITHUB_OUTPUT"
+              echo "busysign $VERSION is already published on main: nothing to upload or commit"
+              ;;
+            1)
+              if ! result="$(scripts/check-not-older.sh Formula/busysign.rb "$VERSION" 2>&1)"; then
+                echo "::error::${result#error: }"
+                exit 1
+              fi
+              echo "published=false" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              exit "$status"
+              ;;
+          esac
+
       - name: Download the formula
+        if: steps.main.outputs.published == 'false'
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: formula
           path: Formula
 
+      - name: Download the bottles
+        if: steps.main.outputs.published == 'false'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: bottle-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/bottles
+
+      # The formula may point only at bottles that are uploaded: upload and check them first.
+      - name: Upload the bottles to the tap release
+        if: steps.main.outputs.published == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: scripts/upload-bottles.sh "$REPO" "busysign-$VERSION" "$RUNNER_TEMP/bottles"
+
+      - name: Write the bottle block
+        if: steps.main.outputs.published == 'false'
+        run: scripts/write-bottle-block.sh Formula/busysign.rb "$RUNNER_TEMP"/bottles/*.bottle.json
+
       - name: Commit and push
+        if: steps.main.outputs.published == 'false'
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
           GIT_AUTHOR_NAME: github-actions[bot]
@@ -169,3 +234,38 @@ jobs:
           fi
           git commit -m "busysign $VERSION"
           git push origin HEAD:refs/heads/main
+
+  # The formula is published by now; a failure here turns the run red and is fixed forward. It also runs when
+  # publish found the version already on main, and then checks that formula.
+  verify:
+    name: verify
+    needs: [prepare, publish]
+    strategy:
+      fail-fast: false
+      matrix:
+        # xcode-27 is GitHub's public-preview macOS 27 image (actions/runner-images#14404).
+        os: [macos-15, macos-26, xcode-27]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      HOMEBREW_NO_INSTALL_CLEANUP: "1"
+      HOMEBREW_NO_ANALYTICS: "1"
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Select Command Line Tools
+        run: sudo xcode-select -s /Library/Developer/CommandLineTools
+
+      - name: Install busysign from the tap as a user would
+        run: brew install v0rest/tap/busysign
+
+      - name: Check the poured bottle
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: scripts/check-poured.sh "$VERSION"

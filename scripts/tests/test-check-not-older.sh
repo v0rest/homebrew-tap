@@ -66,6 +66,14 @@ mkdir -p "$tmp/mixed"
 sed 's|/busysign-1.2.3.tar.gz|/busysign-1.2.4.tar.gz|' "$(formula 1.2.3)" > "$tmp/mixed/busysign.rb"
 expect "$name" "$tmp/mixed/busysign.rb" 1.2.3 1 "cannot read the version"
 
+name="formula with a bottle block is read"
+mkdir -p "$tmp/bottle"
+awk '{ print } /^  license / { print ""; print "  bottle do"
+    print "    root_url \"https://github.com/v0rest/homebrew-tap/releases/download/busysign-1.2.4\""
+    print "    sha256 cellar: :any_skip_relocation, arm64_sequoia: \"" sha "\""; print "  end" }' \
+    sha="$sha" "$(formula 1.2.4)" > "$tmp/bottle/busysign.rb"
+expect "$name" "$tmp/bottle/busysign.rb" 1.2.3 1 "1.2.4, newer than 1.2.3"
+
 expect "malformed version exits 2" "$(formula 1.2.3)" v1.2.3 2
 run "$script" "$(formula 1.2.3)"
 if [[ $rc -ne 2 ]]; then fail "missing version exits 2" "exit $rc"; else ok "missing version exits 2"; fi
