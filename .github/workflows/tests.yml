@@ -1,0 +1,95 @@
+name: tests
+
+# Hand edits: the script tests, and the formula installed, tested and audited on macOS 15, 26 and 27.
+on:
+  pull_request:
+    paths:
+      - "Formula/**"
+      - "scripts/**"
+      - ".github/workflows/**"
+  push:
+    branches: [main]
+    paths:
+      - "Formula/**"
+      - "scripts/**"
+      - ".github/workflows/**"
+
+permissions: {}
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  scripts:
+    name: scripts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Script tests
+        run: scripts/tests/run-tests.sh
+
+  # A cheap look first, so a tap without a formula starts no macOS runner.
+  has-formula:
+    name: has-formula
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      exists: ${{ steps.look.outputs.exists }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Look for the formula
+        id: look
+        run: |
+          if [ -f Formula/busysign.rb ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "No Formula/busysign.rb yet, nothing to install"
+          fi
+
+  formula:
+    name: formula
+    needs: has-formula
+    if: needs.has-formula.outputs.exists == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        # xcode-27 is GitHub's public-preview macOS 27 image (actions/runner-images#14404).
+        os: [macos-15, macos-26, xcode-27]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      HOMEBREW_NO_INSTALL_CLEANUP: "1"
+      HOMEBREW_NO_ANALYTICS: "1"
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Select Command Line Tools
+        run: sudo xcode-select -s /Library/Developer/CommandLineTools
+
+      - name: Install, test and audit the formula
+        run: scripts/test-formula.sh Formula/busysign.rb

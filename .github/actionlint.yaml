@@ -1,0 +1,5 @@
+# xcode-27 is GitHub's public-preview macOS 27 image label (actions/runner-images#14404), not a self-hosted runner.
+# actionlint does not know it yet; listed here so the label check passes.
+self-hosted-runner:
+  labels:
+    - xcode-27

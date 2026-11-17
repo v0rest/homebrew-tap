@@ -1,0 +1,171 @@
+name: bump
+
+# Pulls a busysign release, checks it, tests the formula on macOS 15, 26 and 27 and only then commits it to main.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "BusySign version, e.g. 1.2.3 (empty: the latest release)"
+        required: false
+        default: ""
+        type: string
+  schedule:
+    - cron: "17 6 * * *"
+
+permissions: {}
+
+concurrency:
+  group: bump
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  prepare:
+    name: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      changed: ${{ steps.formula.outputs.changed }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Resolve the version
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED: ${{ inputs.version }}
+        run: |
+          if [ -n "$REQUESTED" ]; then
+            version="$REQUESTED"
+          else
+            tag="$(gh release view --repo v0rest/busysign --json tagName --jq .tagName)"
+            version="${tag#v}"
+          fi
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::The version must look like 1.2.3 (the input, or the latest busysign release tag without v)"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "busysign $version"
+
+      - name: Refuse a version older than the formula's
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          if ! result="$(scripts/check-not-older.sh Formula/busysign.rb "$VERSION" 2>&1)"; then
+            echo "::error::${result#error: }"
+            exit 1
+          fi
+          echo "$result"
+
+      - name: Download the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/release"
+          gh release download "v$VERSION" --repo v0rest/busysign --dir "$RUNNER_TEMP/release" \
+            --pattern "busysign-$VERSION.tar.gz" --pattern "busysign-$VERSION.tar.gz.sha256"
+
+      - name: Verify the release and write the formula
+        id: formula
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          sha="$(scripts/verify-release.sh "$RUNNER_TEMP/release" "$VERSION")"
+          changed="$(scripts/update-formula.sh "$VERSION" "$sha" Formula/busysign.rb)"
+          echo "changed=$changed" >> "$GITHUB_OUTPUT"
+          echo "Formula/busysign.rb $changed for busysign $VERSION"
+
+      - name: Upload the formula
+        if: steps.formula.outputs.changed == 'updated'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: formula
+          path: Formula/busysign.rb
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: true
+
+  test:
+    name: test
+    needs: prepare
+    if: needs.prepare.outputs.changed == 'updated'
+    strategy:
+      fail-fast: false
+      matrix:
+        # xcode-27 is GitHub's public-preview macOS 27 image (actions/runner-images#14404).
+        os: [macos-15, macos-26, xcode-27]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      HOMEBREW_NO_INSTALL_CLEANUP: "1"
+      HOMEBREW_NO_ANALYTICS: "1"
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Select Command Line Tools
+        run: sudo xcode-select -s /Library/Developer/CommandLineTools
+
+      - name: Download the formula
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: formula
+          path: ${{ runner.temp }}/formula
+
+      - name: Install, test and audit the formula
+        run: scripts/test-formula.sh "$RUNNER_TEMP/formula/busysign.rb"
+
+  publish:
+    name: publish
+    needs: [prepare, test]
+    # A run started from another branch tests its formula but never publishes it.
+    if: needs.prepare.outputs.changed == 'updated' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write # push the formula commit to main
+    steps:
+      # The only job that keeps the checkout credentials: it pushes the formula to main.
+      - name: Check out main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          persist-credentials: true
+
+      - name: Download the formula
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: formula
+          path: Formula
+
+      - name: Commit and push
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          GIT_AUTHOR_NAME: github-actions[bot]
+          GIT_AUTHOR_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+          GIT_COMMITTER_NAME: github-actions[bot]
+          GIT_COMMITTER_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+        run: |
+          git add -- Formula/busysign.rb
+          if git diff --cached --quiet -- Formula/; then
+            echo "Formula/busysign.rb on main is already current, nothing to push"
+            exit 0
+          fi
+          git commit -m "busysign $VERSION"
+          git push origin HEAD:refs/heads/main
