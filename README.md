@@ -20,6 +20,14 @@ Then open it once and allow calendar access when macOS asks:
 open "$(brew --prefix)/opt/busysign/BusySign.app"
 ```
 
+Homebrew keeps the app in its own folder. To have it in /Applications as well, add a link there once - it points at
+Homebrew's `opt` folder, so it keeps working after every upgrade. This needs an admin account, with a standard one
+link it into ~/Applications instead (`mkdir -p ~/Applications` first if it isn't there):
+
+```sh
+ln -sfn "$(brew --prefix)/opt/busysign/BusySign.app" /Applications/BusySign.app
+```
+
 The [BusySign README](https://github.com/v0rest/busysign) explains the first run and the settings.
 
 ## Upgrade
@@ -39,6 +47,7 @@ Remove the Busy blocks first, while the app is still there, with "Remove all Bus
 [BusySign README](https://github.com/v0rest/busysign#uninstall) describes. Then quit BusySign and run
 
 ```sh
+rm -f /Applications/BusySign.app ~/Applications/BusySign.app   # the link, if you added one
 brew uninstall busysign
 brew untap v0rest/tap
 ```
